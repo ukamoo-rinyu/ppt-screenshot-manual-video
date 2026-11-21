@@ -1,0 +1,430 @@
+Option Explicit
+
+'============================================================
+' 手順スライド作成マクロ  ver.5
+'  画面構成：上＝共通タイトル（何の操作か）／中＝スクショ／下＝説明文
+'
+'  FormatSlides   : スクショを貼ったスライドを整える（タイトル・説明・音声を付ける）
+'                   ノートやタイトルを直したら、もう一度これを実行すればOK
+'  AddRedCircle   : 赤い丸を置く（あとは手で動かす）
+'  AddRedBox      : 赤い四角を置く（あとは手で動かす）
+'  AddHighlights  : 手で置いた丸・四角に「出現＋強調」アニメーションを一括設定
+'  ExportVideo    : 動画（mp4）に書き出す
+'============================================================
+
+' ===== 設定（ここだけ書き換えればOK）=====
+Const VOICE_RATE As Long = 1             ' 読み上げの速さ（-10～10、0が標準）
+Const PAD_SEC As Single = 1              ' 音声が終わってから次へ進むまでの余白（秒）
+Const NO_VOICE_SEC As Single = 4         ' ノートが空のスライドの表示秒数
+Const MIN_SEC As Single = 5              ' 1枚の最低表示時間（秒）。これより速くは切り替わらない
+
+Const TITLE_H As Single = 50             ' 上のタイトルバーの高さ
+Const TITLE_SIZE As Single = 24          ' タイトルの文字サイズ
+Const CAPTION_H As Single = 80           ' 下の説明欄の高さ
+Const CAPTION_SIZE As Single = 22        ' 説明文の文字サイズ
+Const FONT_NAME As String = "メイリオ"
+
+Const HL_DELAY As Single = 1             ' スライドが出てから赤丸が出るまで（秒）
+Const HL_REPEAT As Long = 3              ' 強調アニメーションの繰り返し回数
+Const HL_LINE As Single = 4              ' 赤丸・赤四角の線の太さ
+
+
+'------------------------------------------------------------
+' ① スクショを貼ったスライドを整える（何度実行してもOK）
+'   ・タイトルを変えたいときは、一番上のスライドのタイトルバーを直して実行
+'   ・説明を直したいときは、ノートを直して実行
+'   ・各スライドに貼ったスクショ（いちばん大きい画像）を真ん中に収める
+'   ・タイトルバーと説明欄を付ける（説明欄の文はノートから）
+'   ・ノートを読み上げた音声を付け、表示時間を合わせる
+'   ・画像のないスライド（表紙など）はそのまま
+'------------------------------------------------------------
+Sub FormatSlides()
+    Dim ttl As String: ttl = FindTitle()
+    If ttl = "" Then
+        ttl = InputBox("全スライド共通のタイトル（何の操作か）を入力してください。" & vbCrLf & _
+                       "例：レイヤを追加して表示する", "タイトル")
+    End If
+
+    Dim voice As Object: Set voice = CreateVoice()
+    Dim sld As Slide, pic As Shape, n As Long, j As Long, s As Shape
+    For Each sld In ActivePresentation.Slides
+        Set pic = FindScreenshot(sld)
+        If Not pic Is Nothing Then
+            pic.Name = "Screenshot"
+            ' レイアウトの空の枠（「タイトルを入力」など）を消す
+            For j = sld.Shapes.Count To 1 Step -1
+                Set s = sld.Shapes(j)
+                If s.Type = msoPlaceholder And s.Name <> "Screenshot" Then
+                    If s.HasTextFrame Then
+                        If Not s.TextFrame.HasText Then s.Delete
+                    End If
+                End If
+            Next
+            FinishSlide sld, ttl, voice
+            n = n + 1
+            DoEvents
+        End If
+    Next
+
+    MsgBox n & " 枚のスライドを整えました。" & vbCrLf & _
+           "赤丸・赤四角を置いたら AddHighlights を実行してください。"
+End Sub
+
+
+'------------------------------------------------------------
+' ② 赤丸・赤四角を置く（今のスライドの真ん中に出るので、手で動かす）
+'------------------------------------------------------------
+Sub AddRedCircle()
+    AddRedShape msoShapeOval
+End Sub
+
+Sub AddRedBox()
+    AddRedShape msoShapeRectangle
+End Sub
+
+Private Sub AddRedShape(kind As Long)
+    Dim sld As Slide
+    On Error Resume Next
+    Set sld = ActiveWindow.View.Slide
+    On Error GoTo 0
+    If sld Is Nothing Then MsgBox "スライドを表示した状態で実行してください。": Exit Sub
+
+    Dim sw As Single, sh As Single, s As Shape
+    sw = ActivePresentation.PageSetup.SlideWidth
+    sh = ActivePresentation.PageSetup.SlideHeight
+    Set s = sld.Shapes.AddShape(kind, sw / 2 - 50, sh / 2 - 30, 100, 60)
+    s.Fill.Visible = msoFalse
+    s.Line.ForeColor.RGB = RGB(255, 0, 0)
+    s.Line.Weight = HL_LINE
+    s.Select
+End Sub
+
+
+'------------------------------------------------------------
+' ③ 手で置いた図形に強調アニメーションを一括設定（何度実行してもOK）
+'    対象：丸・四角・矢印などの図形（タイトル・説明欄・スクショ・音声は対象外）
+'    動き：HL_DELAY 秒後にフェードで出現 → パルスで HL_REPEAT 回点滅
+'          1枚に複数あるときは、置いた順に1つずつ出る
+'------------------------------------------------------------
+Sub AddHighlights()
+    Dim sld As Slide, seq As Sequence, k As Long
+    Dim s As Shape, e As Effect, first As Boolean, n As Long
+
+    For Each sld In ActivePresentation.Slides
+        Set seq = sld.TimeLine.MainSequence
+
+        ' 前に付けた強調アニメーションを消す
+        For k = seq.Count To 1 Step -1
+            If IsHighlight(seq(k).Shape) Then seq(k).Delete
+        Next
+
+        first = True
+        For Each s In sld.Shapes
+            If IsHighlight(s) Then
+                ' 出現（フェード）
+                If first Then
+                    Set e = seq.AddEffect(Shape:=s, effectId:=msoAnimEffectFade, _
+                                          trigger:=msoAnimTriggerWithPrevious)
+                    e.Timing.TriggerDelayTime = HL_DELAY
+                Else
+                    Set e = seq.AddEffect(Shape:=s, effectId:=msoAnimEffectFade, _
+                                          trigger:=msoAnimTriggerAfterPrevious)
+                    e.Timing.TriggerDelayTime = 0.3
+                End If
+                e.Timing.Duration = 0.4
+
+                ' 強調（パルス）
+                Set e = seq.AddEffect(Shape:=s, effectId:=msoAnimEffectFlashBulb, _
+                                      trigger:=msoAnimTriggerAfterPrevious)
+                e.Timing.RepeatCount = HL_REPEAT
+
+                first = False
+                n = n + 1
+            End If
+        Next
+
+        KeepNarrationFirst sld
+        ApplyMinTime sld
+    Next
+
+    MsgBox n & " 個の図形にアニメーションを付けました。"
+End Sub
+
+
+'------------------------------------------------------------
+' ④ 動画に書き出す（先にファイルを保存しておく）
+'------------------------------------------------------------
+Sub ExportVideo()
+    Dim pres As Presentation: Set pres = ActivePresentation
+    If pres.Path = "" Then MsgBox "先にこのファイルを保存してください。": Exit Sub
+
+    Dim base As String
+    base = pres.Name
+    If InStrRev(base, ".") > 0 Then base = Left(base, InStrRev(base, ".") - 1)
+
+    Dim fn As String: fn = pres.Path & "\" & base & ".mp4"
+    pres.CreateVideo FileName:=fn, UseTimingsAndNarrations:=True, _
+                     DefaultSlideDuration:=NO_VOICE_SEC, VertResolution:=1080, _
+                     FramesPerSecond:=30, Quality:=85
+    MsgBox "動画の書き出しを始めました。" & vbCrLf & _
+           "画面下に進み具合が出ます。終わるまでパワポを閉じないでください。" & vbCrLf & fn
+End Sub
+
+
+'============================================================
+' ここから下は部品（直接実行しない）
+'============================================================
+
+' スライドを仕上げる：スクショ配置・タイトル・説明欄・切り替え・音声
+Private Sub FinishSlide(sld As Slide, ttl As String, voice As Object)
+    Dim sw As Single, sh As Single
+    sw = ActivePresentation.PageSetup.SlideWidth
+    sh = ActivePresentation.PageSetup.SlideHeight
+
+    Dim pic As Shape: Set pic = FindScreenshot(sld)
+    If Not pic Is Nothing Then FitPicture pic, 0, TITLE_H, sw, sh - TITLE_H - CAPTION_H
+
+    DeleteByName sld, "TitleBar"
+    DeleteByName sld, "Caption"
+    AddBar sld, "TitleBar", ttl, 0, sw, TITLE_H, TITLE_SIZE, RGB(31, 78, 121), True
+    AddBar sld, "Caption", CaptionText(sld), sh - CAPTION_H, sw, CAPTION_H, CAPTION_SIZE, RGB(30, 30, 30), False
+
+    With sld.SlideShowTransition
+        .EntryEffect = ppEffectFadeSmoothly
+        .Duration = 0.5
+    End With
+
+    BuildVoice sld, voice
+End Sub
+
+' スクショを探す（"Screenshot" という名前の画像、なければいちばん大きい画像）
+Private Function FindScreenshot(sld As Slide) As Shape
+    Dim s As Shape, best As Shape, isPic As Boolean
+    For Each s In sld.Shapes
+        If s.Name = "Screenshot" Then Set FindScreenshot = s: Exit Function
+    Next
+    For Each s In sld.Shapes
+        isPic = (s.Type = msoPicture)
+        If s.Type = msoPlaceholder Then
+            On Error Resume Next
+            isPic = (s.PlaceholderFormat.ContainedType = msoPicture)
+            On Error GoTo 0
+        End If
+        If isPic Then
+            If best Is Nothing Then
+                Set best = s
+            ElseIf s.Width * s.Height > best.Width * best.Height Then
+                Set best = s
+            End If
+        End If
+    Next
+    Set FindScreenshot = best
+End Function
+
+' すでにあるタイトルバーの文字を探す
+Private Function FindTitle() As String
+    Dim sld As Slide, s As Shape
+    For Each sld In ActivePresentation.Slides
+        For Each s In sld.Shapes
+            If s.Name = "TitleBar" Then FindTitle = s.TextFrame.TextRange.Text: Exit Function
+        Next
+    Next
+End Function
+
+Private Sub DeleteByName(sld As Slide, nm As String)
+    Dim j As Long
+    For j = sld.Shapes.Count To 1 Step -1
+        If sld.Shapes(j).Name = nm Then sld.Shapes(j).Delete
+    Next
+End Sub
+
+' ノートの「画面の文｜読み上げる文」を分ける（｜がなければ両方同じ）
+Private Function CaptionText(sld As Slide) As String
+    Dim t As String, p As Long
+    t = Replace(Trim(GetNotes(sld)), "｜", "|")
+    p = InStr(t, "|")
+    If p > 0 Then CaptionText = Trim(Left(t, p - 1)) Else CaptionText = t
+End Function
+
+Private Function NarrationText(sld As Slide) As String
+    Dim t As String, p As Long
+    t = Replace(Trim(GetNotes(sld)), "｜", "|")
+    p = InStr(t, "|")
+    If p > 0 Then NarrationText = Trim(Mid(t, p + 1)) Else NarrationText = t
+End Function
+
+' 強調の対象になる図形か（手で置いた丸・四角・矢印など）
+Private Function IsHighlight(s As Shape) As Boolean
+    Select Case s.Name
+        Case "Screenshot", "TitleBar", "Caption", "Narration"
+            IsHighlight = False
+        Case Else
+            IsHighlight = (s.Type = msoAutoShape Or s.Type = msoLine Or s.Type = msoFreeform)
+    End Select
+End Function
+
+' 読み上げ音声をアニメーションの先頭に置く（スライドが出たらすぐ再生）
+Private Sub KeepNarrationFirst(sld As Slide)
+    Dim seq As Sequence, k As Long
+    Set seq = sld.TimeLine.MainSequence
+    For k = 1 To seq.Count
+        If seq(k).Shape.Name = "Narration" Then
+            If k > 1 Then seq(k).MoveTo 1
+            seq(1).Timing.TriggerType = msoAnimTriggerWithPrevious
+            Exit Sub
+        End If
+    Next
+End Sub
+
+' 表示時間が短すぎないようにする
+'   ・最低表示時間（MIN_SEC）より短ければ延ばす
+'   ・赤丸のアニメーションが終わる前に切り替わらないよう延ばす
+Private Sub ApplyMinTime(sld As Slide)
+    Dim e As Effect, st As Single, en As Single, d As Single, rep As Single
+    Dim prevStart As Single, prevEnd As Single, animEnd As Single
+    For Each e In sld.TimeLine.MainSequence
+        If e.Shape.Name <> "Narration" Then
+            rep = e.Timing.RepeatCount
+            If rep < 1 Then rep = 1
+            d = e.Timing.Duration * rep
+            If e.Timing.TriggerType = msoAnimTriggerWithPrevious Then
+                st = prevStart + e.Timing.TriggerDelayTime
+            Else
+                st = prevEnd + e.Timing.TriggerDelayTime
+            End If
+            en = st + d
+            prevStart = st
+            prevEnd = en
+            If en > animEnd Then animEnd = en
+        End If
+    Next
+
+    With sld.SlideShowTransition
+        If .AdvanceTime < MIN_SEC Then .AdvanceTime = MIN_SEC
+        If animEnd > 0 And .AdvanceTime < animEnd + PAD_SEC Then .AdvanceTime = animEnd + PAD_SEC
+    End With
+End Sub
+
+' スライド1枚分の音声を作って貼り、表示時間を合わせる
+Private Sub BuildVoice(sld As Slide, voice As Object)
+    Dim j As Long
+    For j = sld.Shapes.Count To 1 Step -1          ' 前に作った音声を消す
+        If sld.Shapes(j).Name = "Narration" Then sld.Shapes(j).Delete
+    Next
+
+    Dim txt As String: txt = NarrationText(sld)
+    With sld.SlideShowTransition
+        .AdvanceOnClick = msoTrue
+        .AdvanceOnTime = msoTrue
+        .AdvanceTime = NO_VOICE_SEC
+    End With
+    If txt = "" Then ApplyMinTime sld: Exit Sub
+
+    Dim fso As Object: Set fso = CreateObject("Scripting.FileSystemObject")
+    Dim tmp As String: tmp = Environ("TEMP") & "\ppt_voice\"
+    If Not fso.FolderExists(tmp) Then fso.CreateFolder tmp
+    Dim wav As String
+    wav = tmp & "s" & sld.SlideID & "_" & Format(Now, "hhnnss") & ".wav"
+
+    SpeakToWav voice, txt, wav
+
+    Dim shp As Shape
+    Set shp = sld.Shapes.AddMediaObject2(FileName:=wav, LinkToFile:=msoFalse, _
+                                         SaveWithDocument:=msoTrue, Left:=-80, Top:=0)
+    shp.Name = "Narration"                         ' スライドの外に置くので動画に映らない
+    sld.TimeLine.MainSequence.AddEffect Shape:=shp, effectId:=msoAnimEffectMediaPlay, _
+                                        trigger:=msoAnimTriggerWithPrevious
+    KeepNarrationFirst sld
+
+    Dim sec As Single
+    On Error Resume Next
+    sec = shp.MediaFormat.Length / 1000
+    On Error GoTo 0
+    If sec <= 0 Then sec = Len(txt) * 0.15         ' 長さが取れないときは文字数から推定
+
+    sld.SlideShowTransition.AdvanceTime = sec + PAD_SEC
+    ApplyMinTime sld
+
+    On Error Resume Next
+    Kill wav                                       ' 埋め込み済みなので一時ファイルは消す
+    On Error GoTo 0
+End Sub
+
+' Windowsの日本語音声を用意する
+Private Function CreateVoice() As Object
+    Dim v As Object: Set v = CreateObject("SAPI.SpVoice")
+    Dim toks As Object: Set toks = v.GetVoices("Language=411")
+    If toks.Count > 0 Then
+        Set v.Voice = toks.Item(0)
+    Else
+        MsgBox "日本語の音声が見つかりませんでした。標準の音声で読み上げます。"
+    End If
+    v.Rate = VOICE_RATE
+    Set CreateVoice = v
+End Function
+
+' 文章を読み上げてwavに保存する
+Private Sub SpeakToWav(voice As Object, txt As String, wav As String)
+    Dim fmt As Object: Set fmt = CreateObject("SAPI.SpAudioFormat")
+    fmt.Type = 22                                  ' 22kHz 16bit モノラル
+    Dim strm As Object: Set strm = CreateObject("SAPI.SpFileStream")
+    Set strm.Format = fmt
+    strm.Open wav, 3, False
+    Set voice.AudioOutputStream = strm
+    voice.Speak txt, 16                            ' 16 = 記号をタグ扱いしない
+    strm.Close
+    Set voice.AudioOutputStream = Nothing
+End Sub
+
+' 画像を指定の範囲に収まるように配置
+Private Sub FitPicture(pic As Shape, _
+                       areaL As Single, areaT As Single, areaW As Single, areaH As Single)
+    pic.LockAspectRatio = msoTrue
+    Dim r As Single
+    r = areaW / pic.Width
+    If areaH / pic.Height < r Then r = areaH / pic.Height
+    pic.Width = pic.Width * r
+    pic.Left = areaL + (areaW - pic.Width) / 2
+    pic.Top = areaT + (areaH - pic.Height) / 2
+    pic.Name = "Screenshot"
+End Sub
+
+' 帯（タイトルバー・説明欄）
+Private Sub AddBar(sld As Slide, nm As String, txt As String, top As Single, _
+                   w As Single, h As Single, fsize As Single, bg As Long, bold As Boolean)
+    Dim tb As Shape
+    Set tb = sld.Shapes.AddTextbox(msoTextOrientationHorizontal, 0, top, w, h)
+    tb.Name = nm
+    tb.Fill.Visible = msoTrue
+    tb.Fill.ForeColor.RGB = bg
+    With tb.TextFrame
+        .AutoSize = ppAutoSizeNone
+        .WordWrap = msoTrue
+        .VerticalAnchor = msoAnchorMiddle
+        .MarginLeft = 20
+        .MarginRight = 20
+        With .TextRange
+            .Text = txt
+            .Font.Size = fsize
+            .Font.Name = FONT_NAME
+            .Font.NameFarEast = FONT_NAME
+            .Font.Bold = IIf(bold, msoTrue, msoFalse)
+            .Font.Color.RGB = RGB(255, 255, 255)
+        End With
+    End With
+    tb.Top = top
+    tb.Height = h
+End Sub
+
+' ノート欄を読む
+Private Function NotesBody(sld As Slide) As Shape
+    Dim s As Shape
+    For Each s In sld.NotesPage.Shapes.Placeholders
+        If s.PlaceholderFormat.Type = ppPlaceholderBody Then Set NotesBody = s: Exit Function
+    Next
+End Function
+
+Private Function GetNotes(sld As Slide) As String
+    Dim s As Shape: Set s = NotesBody(sld)
+    If Not s Is Nothing Then GetNotes = s.TextFrame.TextRange.Text
+End Function
